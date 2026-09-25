@@ -150,9 +150,46 @@ fn check_entries(entries: &[Entry]) -> Vec<Finding> {
     findings
 }
 
+// Missing sources are only worth reporting once. If a source already escapes
+// the repo, check_entries has flagged that; piling "also doesn't exist" on
+// top of a path that shouldn't be there in the first place is just noise.
+fn check_sources_exist(entries: &[Entry], root: &Path) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    for entry in entries {
+        if escapes_repo(&entry.source) {
+            continue;
+        }
+
+        if !root.join(&entry.source).exists() {
+            findings.push(Finding::error(
+                entry.line,
+                format!(
+                    "source '{}' does not exist under {}",
+                    entry.source,
+                    root.display()
+                ),
+            ));
+        }
+    }
+
+    findings
+}
+
 pub fn lint(text: &str) -> Vec<Finding> {
     let (entries, mut findings) = parse(text);
     findings.extend(check_entries(&entries));
+    findings.sort_by_key(|f| f.line);
+    findings
+}
+
+/// Same static checks as `lint`, plus a filesystem check that each source
+/// actually exists under `root` (the directory the checks treat as the
+/// dotfiles repo root).
+pub fn lint_with_root(text: &str, root: &Path) -> Vec<Finding> {
+    let (entries, mut findings) = parse(text);
+    findings.extend(check_entries(&entries));
+    findings.extend(check_sources_exist(&entries, root));
     findings.sort_by_key(|f| f.line);
     findings
 }
@@ -260,5 +297,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn missing_source_is_flagged_against_the_filesystem() {
+        let root = std::env::temp_dir().join(format!(
+            "dotlink-lint-test-{}-{}",
+            std::process::id(),
+            "missing_source_is_flagged_against_the_filesystem"
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("present"), b"").unwrap();
+
+        let manifest = "present -> ~/.present\nmissing -> ~/.missing\n";
+        let findings = lint_with_root(manifest, &root);
+
+        assert_eq!(findings.len(), 1, "expected one finding, got {:?}", findings);
+        assert_eq!(findings[0].line, 2);
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert!(findings[0].message.contains("does not exist"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn missing_source_that_also_escapes_the_repo_is_only_flagged_once() {
+        let root = std::env::temp_dir().join(format!(
+            "dotlink-lint-test-{}-{}",
+            std::process::id(),
+            "missing_source_that_also_escapes_the_repo_is_only_flagged_once"
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let manifest = "../../etc/passwd -> ~/.passwd\n";
+        let findings = lint_with_root(manifest, &root);
+
+        assert_eq!(findings.len(), 1, "expected one finding, got {:?}", findings);
+        assert!(findings[0].message.contains("escapes the dotfiles repo"));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

@@ -36,9 +36,12 @@ git/gitconfig  -> ~/.gitconfig
 vim/vimrc      -> ~/.vimrc
 ```
 
-`source` is a path relative to the root of your dotfiles repo. `target`
-should start with `~/` or `/` so it resolves the same way no matter where
-you run the tool from.
+`source` is a path relative to the root of your dotfiles repo, and must
+exist on disk there. `target` should start with `~/` or `/` so it resolves
+the same way no matter where you run the tool from.
+
+The repo root is currently just the directory the manifest file lives in;
+there's no separate config for it yet.
 
 ## usage
 
@@ -62,7 +65,7 @@ cargo build --release
 
 ## status
 
-Early skeleton. The checks so far are all static: duplicate sources,
-duplicate targets, empty fields, sources that escape the repo via `..`,
-and targets that aren't rooted under `~` or `/`. See the tests in
+Early skeleton. Checks so far: duplicate sources, duplicate targets, empty
+fields, sources that escape the repo via `..`, sources that don't exist on
+disk, and targets that aren't rooted under `~` or `/`. See the tests in
 `src/linter.rs` for the exact cases covered.

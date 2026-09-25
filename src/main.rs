@@ -2,6 +2,7 @@ mod linter;
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -24,7 +25,15 @@ fn main() -> ExitCode {
         }
     };
 
-    let findings = linter::lint(&text);
+    // Sources are resolved relative to the manifest's own directory: that's
+    // where a dotfiles repo's manifest normally lives, and it's the closest
+    // thing to a repo root until there's real config for one (see README).
+    let root = Path::new(&path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+
+    let findings = linter::lint_with_root(&text, root);
     let mut had_error = false;
 
     for finding in &findings {

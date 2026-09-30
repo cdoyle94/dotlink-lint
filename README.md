@@ -67,5 +67,7 @@ cargo build --release
 
 Early skeleton. Checks so far: duplicate sources, duplicate targets, empty
 fields, sources that escape the repo via `..`, sources that don't exist on
-disk, and targets that aren't rooted under `~` or `/`. See the tests in
+disk, targets that aren't rooted under `~` or `/`, and targets that already
+exist as a regular file or directory instead of a symlink (`~` is taken from
+`$HOME`). See the tests in
 `src/linter.rs` for the exact cases covered.

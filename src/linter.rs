@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Component, Path};
+use std::fs;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Severity {
@@ -176,6 +177,49 @@ fn check_sources_exist(entries: &[Entry], root: &Path) -> Vec<Finding> {
     findings
 }
 
+/// Resolves a manifest target to a concrete path. `~/` needs a home directory;
+/// without one, or for a target that isn't rooted, there is nothing sensible
+/// to look at on disk.
+fn resolve_target(target: &str, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(rest) = target.strip_prefix("~/") {
+        return home.map(|h| h.join(rest));
+    }
+    if target.starts_with('/') {
+        return Some(PathBuf::from(target));
+    }
+    None
+}
+
+// A real file or directory sitting at the target is what makes `ln -s` fail
+// (or, with -f, destroy data), so it is worth a warning before anyone runs it.
+// symlink_metadata is used so that an existing symlink, even a dangling one,
+// is not mistaken for a regular file.
+fn check_targets_not_clobbering(entries: &[Entry], home: Option<&Path>) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    for entry in entries {
+        let path = match resolve_target(&entry.target, home) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        if let Ok(meta) = fs::symlink_metadata(&path) {
+            if !meta.file_type().is_symlink() {
+                let kind = if meta.is_dir() { "directory" } else { "file" };
+                findings.push(Finding::warning(
+                    entry.line,
+                    format!(
+                        "target '{}' already exists as a regular {} and is not a symlink",
+                        entry.target, kind
+                    ),
+                ));
+            }
+        }
+    }
+
+    findings
+}
+
 pub fn lint(text: &str) -> Vec<Finding> {
     let (entries, mut findings) = parse(text);
     findings.extend(check_entries(&entries));
@@ -183,13 +227,15 @@ pub fn lint(text: &str) -> Vec<Finding> {
     findings
 }
 
-/// Same static checks as `lint`, plus a filesystem check that each source
-/// actually exists under `root` (the directory the checks treat as the
-/// dotfiles repo root).
-pub fn lint_with_root(text: &str, root: &Path) -> Vec<Finding> {
+/// Same static checks as `lint`, plus filesystem checks: each source must
+/// exist under `root` (the directory treated as the dotfiles repo root), and
+/// a target that already exists must be a symlink. `home` is what `~/` in a
+/// target expands to; when it is `None`, `~/` targets are not checked.
+pub fn lint_with_root(text: &str, root: &Path, home: Option<&Path>) -> Vec<Finding> {
     let (entries, mut findings) = parse(text);
     findings.extend(check_entries(&entries));
     findings.extend(check_sources_exist(&entries, root));
+    findings.extend(check_targets_not_clobbering(&entries, home));
     findings.sort_by_key(|f| f.line);
     findings
 }
@@ -310,7 +356,7 @@ mod tests {
         std::fs::write(root.join("present"), b"").unwrap();
 
         let manifest = "present -> ~/.present\nmissing -> ~/.missing\n";
-        let findings = lint_with_root(manifest, &root);
+        let findings = lint_with_root(manifest, &root, None);
 
         assert_eq!(findings.len(), 1, "expected one finding, got {:?}", findings);
         assert_eq!(findings[0].line, 2);
@@ -330,11 +376,68 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         let manifest = "../../etc/passwd -> ~/.passwd\n";
-        let findings = lint_with_root(manifest, &root);
+        let findings = lint_with_root(manifest, &root, None);
 
         assert_eq!(findings.len(), 1, "expected one finding, got {:?}", findings);
         assert!(findings[0].message.contains("escapes the dotfiles repo"));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dotlink-lint-test-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn existing_regular_file_or_directory_at_target_is_a_warning() {
+        let root = scratch_dir("clobber_root");
+        let home = scratch_dir("clobber_home");
+        std::fs::write(root.join("a"), b"").unwrap();
+        std::fs::write(root.join("b"), b"").unwrap();
+        std::fs::write(root.join("c"), b"").unwrap();
+        std::fs::write(home.join(".a"), b"old").unwrap();
+        std::fs::create_dir_all(home.join(".b")).unwrap();
+
+        let manifest = "a -> ~/.a\nb -> ~/.b\nc -> ~/.c\n";
+        let findings = lint_with_root(manifest, &root, Some(&home));
+
+        assert_eq!(findings.len(), 2, "got {:?}", findings);
+        assert_eq!(findings[0].line, 1);
+        assert_eq!(findings[0].severity, Severity::Warning);
+        assert!(findings[0].message.contains("regular file"));
+        assert_eq!(findings[1].line, 2);
+        assert!(findings[1].message.contains("regular directory"));
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn home_targets_are_skipped_without_a_home_directory() {
+        let root = scratch_dir("nohome_root");
+        std::fs::write(root.join("a"), b"").unwrap();
+
+        let findings = lint_with_root("a -> ~/.a\n", &root, None);
+        assert!(findings.is_empty(), "got {:?}", findings);
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_symlink_at_target_is_not_a_clobber_warning() {
+        let root = scratch_dir("symlink_root");
+        let home = scratch_dir("symlink_home");
+        std::fs::write(root.join("a"), b"").unwrap();
+        // Dangling on purpose: it must still count as a symlink.
+        std::os::unix::fs::symlink(home.join("nowhere"), home.join(".a")).unwrap();
+
+        let findings = lint_with_root("a -> ~/.a\n", &root, Some(&home));
+        assert!(findings.is_empty(), "got {:?}", findings);
+
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

@@ -2,7 +2,7 @@ mod linter;
 
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -33,7 +33,10 @@ fn main() -> ExitCode {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
 
-    let findings = linter::lint_with_root(&text, root);
+    // Until there is a config option for it, home comes from $HOME.
+    let home = env::var_os("HOME").map(PathBuf::from);
+
+    let findings = linter::lint_with_root(&text, root, home.as_deref());
     let mut had_error = false;
 
     for finding in &findings {
